@@ -1,0 +1,114 @@
+import socket
+import numpy as np
+from controller import Robot
+import threading
+import time
+
+# Real NAO Config
+NAO_IP = "192.168.1.110"
+NAO_PORT = 9559
+JOINT_NAMES = ["RShoulderPitch", "RShoulderRoll", "RElbowYaw", "RElbowRoll"]
+
+# ------------------------ Forward Kinematics ------------------------
+def dh_transform(a, alpha, d, theta):
+    ct, st = np.cos(theta), np.sin(theta)
+    ca, sa = np.cos(alpha), np.sin(alpha)
+    return np.array([
+        [ct, -st * ca,  st * sa, a * ct],
+        [st,  ct * ca, -ct * sa, a * st],
+        [0,       sa,      ca,     d],
+        [0,        0,       0,     1]
+    ])
+
+def forward_kinematics(joint_angles):
+    θ1, θ2, θ3, θ4 = joint_angles
+    dh_params = [
+        (0.0,     -np.pi/2, 0.105, θ1),
+        (0.015,    np.pi/2, 0.0,   θ2),
+        (0.0,     -np.pi/2, 0.0,   θ3),
+        (0.105,    0.0,     0.0,   θ4)
+    ]
+    T = np.eye(4)
+    for a, alpha, d, theta in dh_params:
+        T = np.dot(T, dh_transform(a, alpha, d, theta))
+    print(f"[KIN] End-effector XYZ: {T[:3, 3]}")
+    return T
+
+# ------------------------ NAO Control ------------------------
+def is_nao_online(ip, port):
+    try:
+        with socket.create_connection((ip, port), timeout=2):
+            return True
+    except Exception:
+        return False
+
+def start_real_nao_motion(angle_queue):
+    from naoqi import ALProxy
+    try:
+        motion = ALProxy("ALMotion", NAO_IP, NAO_PORT)
+        posture = ALProxy("ALRobotPosture", NAO_IP, NAO_PORT)
+        motion.wakeUp()
+        posture.goToPosture("StandInit", 0.5)
+        print("[REAL] Connected to NAO. Awaiting angles...")
+        while True:
+            if not angle_queue:
+                time.sleep(0.1)
+                continue
+            angles = angle_queue.pop(0)
+            print(f"[REAL] Sending to NAO: {angles}")
+            motion.setAngles(JOINT_NAMES, angles, 0.2)
+            forward_kinematics(angles)
+    except Exception as e:
+        print(f"[REAL] Error: {e}")
+
+# ------------------------ Webots Setup ------------------------
+robot = Robot()
+timestep = int(robot.getBasicTimeStep())
+joints = {
+    "RShoulderPitch": robot.getDevice("RShoulderPitch"),
+    "RShoulderRoll": robot.getDevice("RShoulderRoll"),
+    "RElbowYaw": robot.getDevice("RElbowYaw"),       
+    "RElbowRoll": robot.getDevice("RElbowRoll"),
+}
+
+for joint in joints.values():
+    joint.setPosition(float('inf'))
+    joint.setVelocity(1.0)
+
+# ------------------------ Socket Server ------------------------
+HOST = '127.0.0.1'
+PORT = 9999
+server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+server_socket.bind((HOST, PORT))
+server_socket.listen(1)
+server_socket.settimeout(0.1)
+
+print(f"[SIM] Listening on {HOST}:{PORT} ...")
+
+angles = [0.0, 0.0, 0.0, 0.0]
+angle_queue = []
+
+# ------------------------ Start NAO Thread (if online) ------------------------
+if is_nao_online(NAO_IP, NAO_PORT):
+    print("[REAL] NAO detected online. Launching real control thread.")
+    threading.Thread(target=start_real_nao_motion, args=(angle_queue,), daemon=True).start()
+else:
+    print("[INFO] NAO not reachable. Real robot control skipped.")
+
+# ------------------------ Main Webots Loop ------------------------
+while robot.step(timestep) != -1:
+    try:
+        client_socket, _ = server_socket.accept()
+        data = client_socket.recv(1024).decode()
+        client_socket.close()
+        angles = list(map(float, data.strip().split(',')))
+        print(f"[SIM] Received angles: {angles}")
+        angle_queue.append(angles)  # also send to NAO
+    except socket.timeout:
+        pass  # No new data this step
+
+    joints["RShoulderPitch"].setPosition(angles[0])
+    joints["RShoulderRoll"].setPosition(angles[1])
+    joints["RElbowYaw"].setPosition(angles[2])
+    joints["RElbowRoll"].setPosition(angles[3])
+    forward_kinematics(angles)

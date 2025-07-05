@@ -1,0 +1,201 @@
+import sys
+import socket
+from PyQt5.QtWidgets import (
+    QApplication, QWidget, QVBoxLayout, QLabel, QLineEdit,
+    QPushButton, QMessageBox, QComboBox, QGroupBox, QFrame
+)
+from PyQt5.QtGui import QFont
+from PyQt5.QtCore import Qt, QPropertyAnimation, QSize
+
+# Configurations
+HOST = '127.0.0.1'
+ARM_PORT = 9999
+LEG_PORT = 9998
+
+class NaoAngleSender(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.initUI()
+
+    def initUI(self):
+        self.setWindowTitle('🤖 NAO Joint Angle Controller')
+        self.resize(400, 250)  # Start compact
+        self.setStyleSheet("""
+            QWidget {
+                background-color: #eef3f8;
+                font-family: 'Segoe UI';
+            }
+            QLabel {
+                font-size: 16px;
+                margin-bottom: 5px;
+                color: #333;
+            }
+            QLineEdit {
+                padding: 8px;
+                font-size: 14px;
+                border: 1px solid #ccc;
+                border-radius: 6px;
+                background: white;
+            }
+            QPushButton {
+                background-color: #4caf50;
+                color: white;
+                padding: 12px;
+                font-size: 16px;
+                font-weight: bold;
+                border: none;
+                border-radius: 8px;
+                margin-top: 20px;
+            }
+            QPushButton:hover {
+                background-color: #43a047;
+            }
+            QGroupBox {
+                border: 1px solid #ddd;
+                border-radius: 10px;
+                background-color: white;
+                padding: 15px;
+                margin-top: 10px;
+            }
+        """)
+
+        self.main_layout = QVBoxLayout()
+
+        # Header
+        header = QLabel("🦾 NAO Joint Angle Controller")
+        header.setFont(QFont("Segoe UI", 20, QFont.Bold))
+        header.setAlignment(Qt.AlignCenter)
+        self.main_layout.addWidget(header)
+
+        # Mode selector (Arm or Leg)
+        self.mode_selector = QComboBox()
+        self.mode_selector.addItems(["Select Mode", "Arm", "Leg"])
+        self.mode_selector.currentIndexChanged.connect(self.switch_mode)
+        self.mode_selector.setStyleSheet("""
+            QComboBox {
+                background-color: white;
+                padding: 8px;
+                font-size: 14px;
+                border: 1px solid #ccc;
+                border-radius: 6px;
+            }
+        """)
+        self.main_layout.addWidget(self.mode_selector)
+
+        # Separator line
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setFrameShadow(QFrame.Sunken)
+        self.main_layout.addWidget(line)
+
+        # Group boxes for arm and leg inputs
+        self.arm_group = self.create_arm_inputs()
+        self.leg_group = self.create_leg_inputs()
+
+        self.main_layout.addWidget(self.arm_group)
+        self.main_layout.addWidget(self.leg_group)
+
+        # Initially hide both
+        self.arm_group.hide()
+        self.leg_group.hide()
+
+        # Send button
+        self.send_button = QPushButton("Send Angles")
+        self.send_button.clicked.connect(self.send_angles)
+        self.send_button.setEnabled(False)
+        self.main_layout.addWidget(self.send_button)
+
+        self.setLayout(self.main_layout)
+
+    def create_arm_inputs(self):
+        group = QGroupBox("🦾 Arm Joint Angles (in radians)")
+        layout = QVBoxLayout()
+
+        self.arm_inputs = []
+        joints = ["RShoulderPitch", "RShoulderRoll", "RElbowYaw", "RElbowRoll"]
+
+        for joint in joints:
+            label = QLabel(joint + ":")
+            input_field = QLineEdit()
+            input_field.setPlaceholderText("e.g., 1.0")
+            layout.addWidget(label)
+            layout.addWidget(input_field)
+            self.arm_inputs.append(input_field)
+
+        group.setLayout(layout)
+        return group
+
+    def create_leg_inputs(self):
+        group = QGroupBox("🦿 Leg Joint Angles (in degrees)")
+        layout = QVBoxLayout()
+
+        self.leg_inputs = []
+        joints = [
+            "LHipYawPitch", "LHipRoll", "LHipPitch",
+            "LKneePitch", "LAnklePitch", "LAnkleRoll"
+        ]
+
+        for joint in joints:
+            label = QLabel(joint + ":")
+            input_field = QLineEdit()
+            input_field.setPlaceholderText("e.g., 30.0")
+            layout.addWidget(label)
+            layout.addWidget(input_field)
+            self.leg_inputs.append(input_field)
+
+        group.setLayout(layout)
+        return group
+
+    def switch_mode(self, index):
+        """Switch between Arm and Leg input fields."""
+        if index == 1:  # Arm
+            self.expand_window()
+            self.arm_group.show()
+            self.leg_group.hide()
+            self.send_button.setEnabled(True)
+        elif index == 2:  # Leg
+            self.expand_window()
+            self.arm_group.hide()
+            self.leg_group.show()
+            self.send_button.setEnabled(True)
+        else:
+            self.arm_group.hide()
+            self.leg_group.hide()
+            self.send_button.setEnabled(False)
+
+    def expand_window(self):
+        """Expand window size nicely."""
+        if self.width() < 500:  # Expand only once
+            self.resize(520, 780)
+
+    def send_angles(self):
+        """Send angles to corresponding port."""
+        try:
+            if self.mode_selector.currentText() == "Arm":
+                angles = [float(field.text()) for field in self.arm_inputs]
+                if len(angles) != 4:
+                    raise ValueError("Please enter 4 arm angles.")
+                port = ARM_PORT
+            elif self.mode_selector.currentText() == "Leg":
+                angles = [float(field.text()) for field in self.leg_inputs]
+                if len(angles) != 6:
+                    raise ValueError("Please enter 6 leg angles.")
+                port = LEG_PORT
+            else:
+                raise ValueError("Please select a mode.")
+
+            message = ','.join(map(str, angles))
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.connect((HOST, port))
+                s.sendall(message.encode())
+
+            QMessageBox.information(self, "Success", "Angles sent successfully!")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Invalid input:\n\n{e}")
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    window = NaoAngleSender()
+    window.show()
+    sys.exit(app.exec_())

@@ -1,0 +1,138 @@
+import socket
+import threading
+import numpy as np
+from controller import Robot
+
+# ------------------------ NAOqi (Real NAO) Setup ------------------------
+try:
+    from naoqi import ALProxy
+    real_nao_available = True
+except ImportError:
+    print("[INFO] NAOqi not available. Running in simulation mode.")
+    real_nao_available = False
+
+# ------------------------ Config ------------------------
+# Real NAO network settings
+NAO_IP = '127.0.0.1'  # Change this when connecting to real NAO
+NAO_PORT = 9559
+
+# Socket settings
+HOST = '127.0.0.1'
+PORT = 9999
+
+# Link lengths (meters)
+l1 = 0.105
+l2 = 0.055
+h = 0.1256
+# Joint limits
+JOINT_LIMITS = {
+    "RShoulderPitch": (-2.0857, 0.8727),
+    "RShoulderRoll": (-0.7854, 1.5708),
+    "RElbowYaw": (-2.0857, 2.0857),
+    "RElbowRoll": (-2.0857, 2.0857),
+}
+
+# ------------------------ Inverse Kinematics ------------------------
+def inverse_kinematics(x, y, z):
+    try:
+        theta1 = np.arctan2(y, x)
+        xy_proj = np.sqrt(x**2 + y**2)
+        d = np.sqrt(xy_proj**2 + z**2)
+        s = np.sqrt(xy_proj**2 + (z- h)**2)
+        if s > (l1 + l2):
+            raise ValueError("Target out of reach.")
+
+        cos_theta4 = ( l1**2 + l2**2 - s**2) / (2 * l1 * l2)
+        theta4 = np.arccos(np.clip(cos_theta4, -1.0, 1.0))
+
+        cos_angle = (l1**2 + d**2 - l2**2) / (2 * l1 * d)
+        angle_a = np.arccos(np.clip(cos_angle, -1.0, 1.0))
+        theta2 = np.arctan2(z-h, xy_proj) - angle_a
+
+        theta3 = 0.0
+
+        theta1 = np.clip(theta1, JOINT_LIMITS["RShoulderRoll"][0], JOINT_LIMITS["RShoulderRoll"][1])
+        theta2 = np.clip(theta2, JOINT_LIMITS["RShoulderPitch"][0], JOINT_LIMITS["RShoulderPitch"][1])
+        theta3 = np.clip(theta3, JOINT_LIMITS["RElbowYaw"][0], JOINT_LIMITS["RElbowYaw"][1])
+        theta4 = np.clip(theta4, JOINT_LIMITS["RElbowRoll"][0], JOINT_LIMITS["RElbowRoll"][1])
+
+        print(f"[IK] Joint angles (rad): {theta1, theta2, theta3, theta4}")
+        return [theta1, theta2, theta3, theta4]
+    except Exception as e:
+        print(f"[IK] Error: {e}")
+        return [0.0, 0.0, 0.0, 0.0]
+
+# ------------------------ Webots Setup ------------------------
+robot = Robot()
+timestep = int(robot.getBasicTimeStep())
+
+# Define Webots joints
+joints = {
+    "RShoulderPitch": robot.getDevice("RShoulderPitch"),
+    "RShoulderRoll": robot.getDevice("RShoulderRoll"),
+    "RElbowYaw": robot.getDevice("RElbowYaw"),
+    "RElbowRoll": robot.getDevice("RElbowRoll"),
+}
+
+for joint in joints.values():
+    joint.setPosition(float('inf'))  # Set to torque control mode
+    joint.setVelocity(1.0)
+
+# Set initial zero positions (so robot is stable)
+for name, joint in joints.items():
+    joint.setPosition(0.0)
+
+# If real NAO available, connect to ALMotion
+if real_nao_available:
+    motion_proxy = ALProxy("ALMotion", NAO_IP, NAO_PORT)
+    print("[REAL NAO] Connected to ALMotion at", NAO_IP)
+
+# ------------------------ Movement Control ------------------------
+pose_queue = []
+move_ready = False
+
+# ------------------------ Socket Listener Thread ------------------------
+def socket_thread():
+    global move_ready
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.bind((HOST, PORT))
+    server_socket.listen(5)
+    print(f"[SIM] Listening for XYZ targets on {HOST}:{PORT} ...")
+
+    while True:
+        client_socket, _ = server_socket.accept()
+        data = client_socket.recv(1024).decode()
+        client_socket.close()
+
+        if data:
+            try:
+                x, y, z = map(float, data.strip().split(','))
+                print(f"[SIM] Received target XYZ: {x, y, z}")
+                pose_queue.append((x, y, z))
+                move_ready = True
+            except ValueError:
+                print("[SIM] Invalid data received.")
+
+# Start socket listener in a separate thread
+threading.Thread(target=socket_thread, daemon=True).start()
+
+# ------------------------ Main Webots Loop ------------------------
+while robot.step(timestep) != -1:
+    if move_ready and pose_queue:
+        x, y, z = pose_queue.pop(0)
+        angles = inverse_kinematics(x, y, z)
+
+        if real_nao_available:
+            # Control Real NAO
+            joint_names = ["RShoulderPitch", "RShoulderRoll", "RElbowYaw", "RElbowRoll"]
+            motion_proxy.setAngles(joint_names, angles, 0.2)  # 0.2 = speed fraction
+            print("[REAL NAO] Sent joint angles to NAO.")
+        else:
+            # Control Webots Simulation
+            joints["RShoulderPitch"].setPosition(angles[0])
+            joints["RShoulderRoll"].setPosition(angles[1])
+            joints["RElbowYaw"].setPosition(angles[2])
+            joints["RElbowRoll"].setPosition(angles[3])
+            print("[SIM] Moved joints in simulation.")
+
+        move_ready = False

@@ -1,0 +1,156 @@
+import sys
+import socket
+from PyQt5.QtWidgets import (
+    QApplication, QWidget, QVBoxLayout, QLabel,
+    QLineEdit, QPushButton, QMessageBox, QComboBox, QFrame
+)
+from PyQt5.QtCore import Qt
+
+# Configuration
+HOST = '127.0.0.1'
+ARM_PORT = 9999
+LEG_PORT = 9998
+
+class PositionSender(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.initUI()
+
+    def initUI(self):
+        self.setWindowTitle('🤖 NAO End-Effector IK Controller')
+        self.resize(400, 250)  # Start compact
+        self.setStyleSheet("""
+            QWidget {
+                background-color: #f0f4f8;
+                font-family: Arial;
+            }
+            QLabel {
+                font-size: 16px;
+                margin-bottom: 4px;
+            }
+            QLineEdit {
+                padding: 6px;
+                font-size: 14px;
+                border: 1px solid #bbb;
+                border-radius: 4px;
+            }
+            QPushButton {
+                font-size: 16px;
+                padding: 10px;
+                background-color: #2196f3;
+                color: white;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #1976d2;
+            }
+            QComboBox {
+                background-color: white;
+                padding: 6px;
+                font-size: 14px;
+                border: 1px solid #bbb;
+                border-radius: 5px;
+            }
+        """)
+
+        self.main_layout = QVBoxLayout()
+
+        # Title
+        header = QLabel("🦿 Send Target XYZ Position")
+        header.setAlignment(Qt.AlignCenter)
+        header.setStyleSheet("font-size: 20px; font-weight: bold;")
+        self.main_layout.addWidget(header)
+
+        # Mode Selector
+        self.mode_selector = QComboBox()
+        self.mode_selector.addItems(["Select Target", "Arm", "Leg"])
+        self.mode_selector.currentIndexChanged.connect(self.expand_inputs)
+        self.main_layout.addWidget(self.mode_selector)
+
+        # Separator
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setFrameShadow(QFrame.Sunken)
+        self.main_layout.addWidget(line)
+
+        # Inputs (X, Y, Z)
+        self.x_input = self.create_labeled_input("X Position (meters)")
+        self.y_input = self.create_labeled_input("Y Position (meters)")
+        self.z_input = self.create_labeled_input("Z Position (meters)")
+
+        self.main_layout.addLayout(self.x_input[0])
+        self.main_layout.addLayout(self.y_input[0])
+        self.main_layout.addLayout(self.z_input[0])
+
+        # Hide input fields initially
+        self.x_input[1].hide()
+        self.y_input[1].hide()
+        self.z_input[1].hide()
+
+        # Send button
+        self.button = QPushButton("Send Position")
+        self.button.clicked.connect(self.send_position)
+        self.button.setEnabled(False)
+        self.main_layout.addWidget(self.button)
+
+        self.setLayout(self.main_layout)
+
+    def create_labeled_input(self, label_text):
+        layout = QVBoxLayout()
+        label = QLabel(label_text)
+        input_field = QLineEdit()
+        input_field.setPlaceholderText("e.g., 0.15")
+        layout.addWidget(label)
+        layout.addWidget(input_field)
+        return layout, input_field
+
+    def expand_inputs(self, index):
+        """Expand window and show input fields after selection."""
+        if index == 1 or index == 2:
+            self.resize(400, 400)
+            self.x_input[1].show()
+            self.y_input[1].show()
+            self.z_input[1].show()
+            self.button.setEnabled(True)
+        else:
+            self.x_input[1].hide()
+            self.y_input[1].hide()
+            self.z_input[1].hide()
+            self.button.setEnabled(False)
+
+    def send_position(self):
+        """Send (x,y,z) to correct IK server (Arm or Leg)."""
+        try:
+            x = float(self.x_input[1].text())
+            y = float(self.y_input[1].text())
+            z = float(self.z_input[1].text())
+
+            message = f"{x},{y},{z}"
+
+            # Determine which port to use
+            if self.mode_selector.currentText() == "Arm":
+                port = ARM_PORT
+            elif self.mode_selector.currentText() == "Leg":
+                port = LEG_PORT
+            else:
+                raise ValueError("Please select a valid mode.")
+
+            # Send over socket
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.connect((HOST, port))
+                s.sendall(message.encode())
+
+            QMessageBox.information(self, 'Success', 'Target Position Sent Successfully!')
+
+        except ValueError:
+            QMessageBox.critical(self, 'Input Error', 'Please enter valid numbers (floats).')
+        except ConnectionRefusedError:
+            QMessageBox.critical(self, 'Connection Error', 'Cannot connect to Webots server!\nMake sure Webots simulation is running.')
+        except Exception as e:
+            QMessageBox.critical(self, 'Error', f'Unexpected error:\n\n{e}')
+
+if __name__ == '__main__':
+    app = QApplication(sys.argv)
+    window = PositionSender()
+    window.show()
+    sys.exit(app.exec_())

@@ -1,0 +1,187 @@
+from controller import Robot
+import numpy as np
+import socket
+import threading
+
+# ----------------------------------------
+# Socket Server to Receive GUI Angles
+# ----------------------------------------
+received_angles = None
+
+def socket_server():
+    global received_angles
+    HOST = '127.0.0.1'
+    PORT = 9998
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind((HOST, PORT))
+        s.listen(1)
+        print(f"[Socket] Waiting for GUI connection on {HOST}:{PORT}...")
+        conn, addr = s.accept()
+        with conn:
+            print(f"[Socket] Connected by {addr}")
+            data = conn.recv(1024)
+            if data:
+                angle_str = data.decode()
+                received_angles = [float(x) for x in angle_str.strip().split(",")]
+                print(f"[Socket] Received angles: {received_angles}")
+
+# Start the socket server in a separate thread
+socket_thread = threading.Thread(target=socket_server)
+socket_thread.start()
+
+# ----------------------------------------
+# Forward Kinematics
+# ----------------------------------------
+
+# D-H Forward Kinematics Functions
+def dh_transform(a, alpha, d, theta):
+    ct, st = np.cos(theta), np.sin(theta)
+    ca, sa = np.cos(alpha), np.sin(alpha)
+    return np.array([
+        [ct, -st * ca,  st * sa, a * ct],
+        [st,  ct * ca, -ct * sa, a * st],
+        [0,       sa,      ca,     d],
+        [0,        0,       0,     1]
+    ])
+
+def forward_kinematics_nao_left_leg(joint_angles_rad):
+    dh_params = [
+        [0.0,    -np.pi/2, 0.050,   joint_angles_rad[0]],
+        [0.0,     np.pi/2, 0.0,     joint_angles_rad[1]],
+        [0.100,  -np.pi/2, 0.0,     joint_angles_rad[2]],
+        [0.1029,  0.0,     0.0,     joint_angles_rad[3]],
+        [0.100,   np.pi/2, 0.0,     joint_angles_rad[4]],
+        [0.0,     0.0,     0.0,     joint_angles_rad[5]]
+    ]
+    T = np.eye(4)
+    for a, alpha, d, theta in dh_params:
+        T = T @ dh_transform(a, alpha, d, theta)
+    return T
+
+def deg2rad(deg_list):
+    return [np.radians(d) for d in deg_list]
+
+def s_curve(t, steps=50):
+    return 1 / (1 + np.exp(-10 * (t / steps - 0.5)))
+
+TIME_STEP = 32
+
+robot = Robot()
+
+ALL_MOTOR_NAMES = [
+    "LHipYawPitch", "LHipRoll", "LHipPitch", "LKneePitch", "LAnklePitch", "LAnkleRoll",
+    "RHipYawPitch", "RHipRoll", "RHipPitch", "RKneePitch", "RAnklePitch", "RAnkleRoll",
+    "LShoulderPitch", "LShoulderRoll", "LElbowYaw", "LElbowRoll", "LWristYaw",
+    "RShoulderPitch", "RShoulderRoll", "RElbowYaw", "RElbowRoll", "RWristYaw",
+    "HeadYaw", "HeadPitch"
+]
+
+LEFT_LEG_JOINTS = [
+    "LHipYawPitch", "LHipRoll", "LHipPitch", "LKneePitch", "LAnklePitch", "LAnkleRoll"
+]
+
+RIGHT_LEG_JOINTS = [
+    "RHipYawPitch", "RHipRoll", "RHipPitch", "RKneePitch", "RAnklePitch", "RAnkleRoll"
+]
+
+motors = {}
+for name in ALL_MOTOR_NAMES:
+    motor = robot.getDevice(name)
+    motor.setPosition(0.0)
+    motors[name] = motor
+
+print("Setting up NAO with initial stability stance...")
+
+motors["LShoulderPitch"].setPosition(0.4)
+motors["RShoulderPitch"].setPosition(0.4)
+motors["LShoulderRoll"].setPosition(0.4)
+motors["RShoulderRoll"].setPosition(-0.4)
+motors["LElbowRoll"].setPosition(-0.7)
+motors["RElbowRoll"].setPosition(0.7)
+
+motors["RHipYawPitch"].setPosition(0.0)
+motors["RHipRoll"].setPosition(-0.1)
+motors["RHipPitch"].setPosition(-0.1)
+motors["RKneePitch"].setPosition(0.2)
+motors["RAnklePitch"].setPosition(-0.1)
+motors["RAnkleRoll"].setPosition(0.1)
+
+motors["LHipYawPitch"].setPosition(0.0)
+motors["LHipRoll"].setPosition(0.1)
+motors["LHipPitch"].setPosition(-0.1)
+motors["LKneePitch"].setPosition(0.1)
+motors["LAnklePitch"].setPosition(0.0)
+motors["LAnkleRoll"].setPosition(-0.1)
+
+motors["RHipRoll"].setPosition(-0.15)
+motors["LHipRoll"].setPosition(0.2)
+motors["HeadYaw"].setPosition(0.1)
+
+print("Stabilizing stance...")
+for _ in range(120):
+    robot.step(TIME_STEP)
+
+initial_positions = {}
+for name in ALL_MOTOR_NAMES:
+    initial_positions[name] = motors[name].getTargetPosition()
+
+# ----------------------------------------
+# Wait for GUI Angles
+# ----------------------------------------
+print("[Main] Waiting for angles to be received from GUI...")
+while received_angles is None:
+    if robot.step(TIME_STEP) == -1:
+        break
+
+# Now received_angles contains 6 joint angles for left leg
+left_pose_deg = received_angles
+right_pose_deg = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # Keep right leg straight
+
+left_pose_rad = deg2rad(left_pose_deg)
+right_pose_rad = deg2rad(right_pose_deg)
+
+print("\nApplying received pose...")
+
+steps = 40
+for step in range(steps):
+    t = s_curve(step, steps)
+
+    for j, joint_name in enumerate(LEFT_LEG_JOINTS):
+        current = motors[joint_name].getTargetPosition()
+        target = left_pose_rad[j]
+        intermediate = current + (target - current) * t
+        motors[joint_name].setPosition(intermediate)
+
+    for j, joint_name in enumerate(RIGHT_LEG_JOINTS):
+        current = motors[joint_name].getTargetPosition()
+        target = right_pose_rad[j]
+        intermediate = current + (target - current) * t
+        motors[joint_name].setPosition(intermediate)
+
+    for name in ALL_MOTOR_NAMES:
+        if name not in LEFT_LEG_JOINTS and name not in RIGHT_LEG_JOINTS:
+            motors[name].setPosition(initial_positions[name])
+
+    if robot.step(TIME_STEP) == -1:
+        break
+
+T_fk_left = forward_kinematics_nao_left_leg(left_pose_rad)
+pos_left = T_fk_left[:3, 3]
+print(f"[Result] Left Leg End-Effector Position (x, y, z): {pos_left.round(4)}")
+print(f"[Result] Left Leg Joint Angles (degrees): {left_pose_deg}")
+
+print("[Result] Holding pose for 2 seconds...")
+for _ in range(int(2 * 1000 / TIME_STEP)):
+    for j, joint_name in enumerate(LEFT_LEG_JOINTS):
+        motors[joint_name].setPosition(left_pose_rad[j])
+    for j, joint_name in enumerate(RIGHT_LEG_JOINTS):
+        motors[joint_name].setPosition(right_pose_rad[j])
+
+    for name in ALL_MOTOR_NAMES:
+        if name not in LEFT_LEG_JOINTS and name not in RIGHT_LEG_JOINTS:
+            motors[name].setPosition(initial_positions[name])
+
+    if robot.step(TIME_STEP) == -1:
+        break
+
+print("Pose sequence complete. Controller terminating.")
