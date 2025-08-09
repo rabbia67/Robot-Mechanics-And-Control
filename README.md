@@ -1,4 +1,4 @@
-# Robot-Mechanics-And-Control
+
 # 🤖 Robot Mechanics and Control – NAO Robot Kinematics
 
 This repository contains implementations, simulations, and documentation for **Forward Kinematics (FK)** and **Inverse Kinematics (IK)** of the NAO humanoid robot's **arms** and **legs**.
